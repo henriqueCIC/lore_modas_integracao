@@ -1,0 +1,12 @@
+{
+  "name": "fantasia-mvp",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=26.0.0" },
+  "scripts": {
+    "dev": "node --env-file-if-exists=.env --watch src/server.js",
+    "start": "node --env-file-if-exists=.env src/server.js",
+    "test": "node --test",
+    "check": "node --check src/domain.js && node --check src/db.js && node --check src/hermes-usage.js && node --check src/gemini.js && node --check src/whatsapp.js && node --check src/reminders.js && node --check src/server.js && node --check public/app.js && node --check public/audio-import.js && node --check public/calendar.js && node --check public/cash.js"
+  }
+}

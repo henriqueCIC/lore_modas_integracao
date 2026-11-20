@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lore Modas • Agenda de fantasias</title>
+  <meta name="theme-color" content="#e8c9c3">
+  <link rel="icon" href="/lore-modas.png" type="image/png">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Ir para o conteúdo</a>
+  <div id="login" class="login-shell" hidden>
+    <form id="login-form" class="login-card">
+      <img class="login-logo" src="/lore-modas.png" alt="Lore Modas — Mais perto de você" width="180" height="180">
+      <span class="eyebrow">LORE MODAS / ACESSO PRIVADO</span>
+      <h1>Sua loja,<br>em ordem.</h1>
+      <p>Entre para acompanhar fantasias, aluguéis e devoluções.</p>
+      <label for="password">Senha de acesso</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required minlength="12">
+      <button type="submit">Entrar no painel <span aria-hidden="true">↗</span></button>
+      <p id="login-error" class="error" role="alert"></p>
+    </form>
+  </div>
+  <div id="app" class="app-shell" hidden>
+    <aside class="sidebar">
+      <div class="brand"><img class="brand-logo" src="/lore-modas.png" alt="Lore Modas — Mais perto de você" width="156" height="156"><small>GESTÃO DE FANTASIAS</small></div>
+      <nav aria-label="Navegação principal">
+        <a href="#hoje" class="nav-link active" data-view="hoje">Hoje</a>
+        <a href="#alugueis" class="nav-link" data-view="alugueis">Aluguéis</a>
+        <a href="#pedidos" class="nav-link" data-view="pedidos">Pedidos</a>
+        <a href="#fantasias" class="nav-link" data-view="fantasias">Fantasias</a>
+        <a href="#caixa" class="nav-link" data-view="caixa">Caixa</a>
+      </nav>
+      <div class="sidebar-foot"><span>Versão inicial · uso local</span><button id="logout" class="text-button">Sair</button></div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar"><span>LORE MODAS / CONTROLE DA LOJA</span><span id="today-label"></span></header>
+      <main id="main">
+        <section id="whatsapp-notice" class="panel whatsapp-notice" hidden aria-live="polite"></section>
+        <section id="view-hoje" class="view">
+          <div class="page-head"><div><span class="eyebrow">VISÃO DO DIA</span><h1>O que precisa de atenção.</h1><p>Retiradas, devoluções e atrasos em um só lugar.</p></div><button id="new-rental" class="primary">Novo aluguel <span aria-hidden="true">＋</span></button></div>
+          <section id="agenda-calendar" class="panel calendar-panel" aria-label="Calendário de retiradas e devoluções"></section>
+          <input type="hidden" id="dashboard-date"><p class="agenda-selected" id="agenda-selected" aria-live="polite"></p>
+          <div class="stats"><article><span>RETIRADAS</span><strong id="pickup-count">0</strong><small>para entregar</small></article><article><span>DEVOLUÇÕES</span><strong id="due-count">0</strong><small>previstas no dia</small></article><article class="alert-stat"><span>ATRASOS</span><strong id="overdue-count">0</strong><small>aguardando retorno</small></article></div>
+          <div class="dashboard-grid"><section class="panel"><div class="panel-head"><h2>Retiradas</h2><span id="pickup-tag" class="tag">Hoje</span></div><div id="pickup-list"></div></section><section class="panel"><div class="panel-head"><h2>Devoluções</h2><span id="due-tag" class="tag">Hoje</span></div><div id="due-list"></div></section></div>
+          <section class="panel overdue-panel"><div class="panel-head"><h2>Em atraso</h2><span class="tag danger">Verificar</span></div><div id="overdue-list"></div></section>
+        </section>
+        <section id="view-alugueis" class="view" hidden>
+          <div class="page-head"><div><span class="eyebrow">HISTÓRICO</span><h1>Aluguéis.</h1><p>Confira cada reserva e registre a devolução.</p></div><button id="new-rental-2" class="primary">Novo aluguel <span aria-hidden="true">＋</span></button></div>
+          <div class="panel import-panel"><div><span class="eyebrow">MIGRAÇÃO DO PAPEL</span><h2>Registre do seu jeito</h2><p>Envie uma foto da ficha. A IA preenche um rascunho para você conferir antes de salvar.</p></div><div class="import-actions"><button type="button" class="file-action" id="photo-button">Foto da ficha</button><input id="photo-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></div></div>
+          <section class="panel audio-panel" data-audio-kind="rentals" aria-label="Aluguéis por áudio"></section>
+          <div class="panel"><div id="rental-list"></div></div>
+        </section>
+        <section id="view-pedidos" class="view" hidden>
+          <div class="page-head"><div><span class="eyebrow">WHATSAPP</span><h1>Pedidos recebidos.</h1><p>Veja o que o cliente já informou e confirme disponibilidade e valores pessoalmente.</p></div></div>
+          <div class="panel"><div id="lead-list"></div></div>
+        </section>
+        <section id="view-fantasias" class="view" hidden>
+          <div class="page-head"><div><span class="eyebrow">ACERVO</span><h1>Fantasias.</h1><p>Cadastre os modelos aos poucos, começando pelos mais procurados.</p></div></div>
+          <section class="panel audio-panel" data-audio-kind="costumes" aria-label="Acervo por áudio"></section>
+          <div class="catalog-grid"><form id="costume-form" class="panel form-panel"><h2>Adicionar fantasia</h2><label for="costume-name">Nome ou personagem</label><input id="costume-name" name="name" required maxlength="120" placeholder="Ex.: Pirata clássico"><label for="costume-size">Tamanho</label><input id="costume-size" name="size" required maxlength="30" placeholder="Ex.: M"><label for="costume-quantity">Quantidade de exemplares</label><input id="costume-quantity" name="quantity" type="number" min="1" step="1" value="1" required><button type="submit" class="primary">Salvar fantasia</button></form><section class="panel"><div class="panel-head"><h2>Itens cadastrados</h2><span id="costume-count" class="tag">0</span></div><div id="costume-list"></div></section></div>
+        </section>
+        <section id="view-caixa" class="view" hidden>
+          <div class="page-head"><div><span class="eyebrow">CONTROLE DE RECEBIMENTOS</span><h1>Caixa.</h1><p>Confira os aluguéis e confirme o dinheiro recebido.</p></div></div>
+          <details id="cash-date-picker" class="panel cash-date-picker"><summary id="cash-date-label">Escolher dia do caixa</summary><div id="cash-calendar"></div></details>
+          <div id="cash-content"></div>
+        </section>
+      </main>
+    </div>
+  </div>
+  <dialog id="rental-dialog">
+    <form id="rental-form" class="dialog-form">
+      <div class="dialog-head"><div><span class="eyebrow">NOVA RESERVA</span><h2>Registrar aluguel</h2></div><button type="button" class="close-button" data-close aria-label="Fechar">×</button></div>
+      <p id="draft-note" class="hint" role="status"></p>
+      <label for="rental-costume">Fantasia e tamanho</label><select id="rental-costume" name="costumeId" required></select>
+      <label for="customer-name">Nome da cliente ou do cliente</label><input id="customer-name" name="customerName" required maxlength="120">
+      <label for="customer-phone">Telefone com DDD</label><input id="customer-phone" name="phone" inputmode="tel" required placeholder="71999999999">
+      <div class="form-row"><div><label for="pickup-date">Retirada</label><input id="pickup-date" name="pickupDate" type="date" required></div><div><label for="due-date">Devolução prevista</label><input id="due-date" name="dueDate" type="date" required></div></div>
+      <label for="price">Valor do aluguel (R$)</label><input id="price" name="price" type="number" min="0" step="0.01" required>
+      <label class="check-row" for="whatsapp-opt-in"><input id="whatsapp-opt-in" name="whatsappOptIn" type="checkbox"> Cliente aceitou receber confirmação da locação e avisos por WhatsApp</label>
+      <p class="hint">A disponibilidade será conferida ao salvar. O aceite deve ter sido dado pelo cliente.</p>
+      <button type="submit" class="primary">Confirmar aluguel</button>
+    </form>
+  </dialog>
+  <dialog id="return-dialog"><form id="return-form" class="dialog-form"><div class="dialog-head"><div><span class="eyebrow">DEVOLUÇÃO</span><h2>Encerrar aluguel</h2></div><button type="button" class="close-button" data-close aria-label="Fechar">×</button></div><p id="return-summary"></p><input type="hidden" name="rentalId"><label for="return-date">Data real da devolução</label><input id="return-date" name="returnedDate" type="date" required><div id="fee-preview" class="fee-preview"></div><button type="submit" class="primary">Confirmar devolução</button></form></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
