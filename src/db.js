@@ -6,6 +6,34 @@ export function createDatabase(path) {
     PRAGMA foreign_keys = ON;
     PRAGMA journal_mode = WAL;
     PRAGMA busy_timeout = 5000;
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE, role TEXT NOT NULL CHECK(role IN ('admin','operator')),
+      salt TEXT NOT NULL, password_hash TEXT NOT NULL, blocked INTEGER NOT NULL DEFAULT 0,
+      must_change INTEGER NOT NULL DEFAULT 0, last_login TEXT
+    );
+    CREATE TABLE IF NOT EXISTS sessions (
+      token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), csrf TEXT NOT NULL,
+      expires_at INTEGER NOT NULL, last_seen INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS admin_events (
+      id INTEGER PRIMARY KEY, actor_id INTEGER REFERENCES users(id), action TEXT NOT NULL,
+      target_id INTEGER REFERENCES users(id), result TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS integration_events (
+      id INTEGER PRIMARY KEY, provider TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL,
+      duration_ms INTEGER NOT NULL DEFAULT 0, model TEXT NOT NULL DEFAULT '', fingerprint TEXT NOT NULL DEFAULT '',
+      tokens INTEGER, message TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS diagnostic_probe (value TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS diagnostic_messages (
+      id TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'accepted', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS diagnostic_challenges (
+      code TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, received_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS backup_runs (
+      id INTEGER PRIMARY KEY, file_name TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, verified_at TEXT
+    );
     CREATE TABLE IF NOT EXISTS costumes (
       id INTEGER PRIMARY KEY, name TEXT NOT NULL, size TEXT NOT NULL,
       quantity INTEGER NOT NULL CHECK (quantity > 0), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -60,5 +88,8 @@ export function createDatabase(path) {
   if (!columns.includes('whatsapp_opt_in')) db.exec('ALTER TABLE rentals ADD COLUMN whatsapp_opt_in INTEGER NOT NULL DEFAULT 0');
   if (!columns.includes('confirmation_sent_at')) db.exec('ALTER TABLE rentals ADD COLUMN confirmation_sent_at TEXT');
   if (!columns.includes('confirmation_attempts')) db.exec('ALTER TABLE rentals ADD COLUMN confirmation_attempts INTEGER NOT NULL DEFAULT 0');
+  if (!columns.includes('customer_name')) {
+    db.exec("ALTER TABLE rentals ADD COLUMN customer_name TEXT NOT NULL DEFAULT ''; UPDATE rentals SET customer_name=(SELECT name FROM customers WHERE customers.id=rentals.customer_id)");
+  }
   return db;
 }

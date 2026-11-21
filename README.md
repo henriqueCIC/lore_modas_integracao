@@ -132,7 +132,7 @@ fantasia-mvp/
 │   ├── audio-import.js    # Gravação, upload, IndexedDB de reenvio e janela rápida de estoque
 │   ├── calendar.js        # Calendário mensal interativo com proteção contra race conditions
 │   └── cash.js            # Controle de Caixa (contratado x recebido confirmado)
-├── test/                  # 38 testes automatizados (API, áudio, domínio, Gemini, WhatsApp)
+├── test/                  # Testes automatizados de API, áudio, domínio, integrações e navegador
 ├── docs/
 │   ├── screenshots/       # Capturas de tela da documentação (dados 100% fictícios)
 │   └── caixa-proximas-etapas.md
@@ -144,13 +144,15 @@ fantasia-mvp/
 
 ## 🚀 Como rodar localmente
 
-Requer **Node.js 26+** (sem precisar rodar `npm install`).
+Requer **Node.js 26+**. O servidor usa APIs nativas; os testes de navegador usam Playwright como dependência de desenvolvimento.
 
-1. Copie o arquivo de exemplo de ambiente e defina uma senha de acesso com pelo menos 12 caracteres:
+Consulte [Administração e implantação](docs/administracao.md) para contas individuais, recuperação de acesso, diagnósticos e backup.
+
+1. Copie o arquivo de exemplo de ambiente:
    ```bash
    cp .env.example .env
    ```
-   Edite o `.env` configurando `ADMIN_PASSWORD` e, opcionalmente, `GEMINI_API_KEY` (para transcrição de áudio e leitura de fotos) e as credenciais da Meta (para envio automático via WhatsApp Cloud API).
+   Crie as contas com `npm run accounts -- create admin henrique` e `npm run accounts -- create operator lore`; os comandos solicitam senhas sem exibi-las. A senha compartilhada `ADMIN_PASSWORD` não é mais aceita. No `.env`, configure opcionalmente `GEMINI_API_KEY` (para transcrição de áudio e leitura de fotos) e as credenciais da Meta (para envio automático via WhatsApp Cloud API).
 
 2. Inicie o servidor:
    ```bash
@@ -165,8 +167,10 @@ Requer **Node.js 26+** (sem precisar rodar `npm install`).
 ### Rodando os testes e validações
 
 ```bash
+npm ci
+npx playwright install chromium
 npm run check   # Valida sintaxe de todos os arquivos JS (back-end e front-end)
-npm test        # Executa os 38 testes automatizados com node:test
+npm test        # Executa a suíte de API, domínio e navegador
 ```
 
 ---

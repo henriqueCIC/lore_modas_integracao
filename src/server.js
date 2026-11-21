@@ -1,10 +1,13 @@
 import { createServer as httpServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { mkdirSync } from 'node:fs';
-import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { createDatabase } from './db.js';
+import { openDatabase } from './open-database.js';
+import { createVerifiedBackup } from './backup.js';
+import { createDiagnostics } from './diagnostics.js';
+import { createAuth } from './auth.js';
+import { handleAdmin } from './admin.js';
 import { daysLate, validDate, validRentalDates } from './domain.js';
 import { extractRentalDraft, extractAudioBatch } from './gemini.js';
 import { extractLead, nextQuestion, sendWhatsAppText, verifyMetaSignature } from './whatsapp.js';
@@ -44,7 +47,11 @@ async function body(req, maxLength = 1_000_000) {
     if (length > maxLength) throw fail(413, 'Conteúdo muito grande');
     chunks.push(chunk);
   }
-  try { return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { throw fail(400, 'JSON inválido'); }
+  try {
+    const value = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error();
+    return value;
+  } catch { throw fail(400, 'JSON inválido'); }
 }
 
 async function rawBody(req, maxLength = 1_000_000) {
@@ -58,15 +65,13 @@ async function rawBody(req, maxLength = 1_000_000) {
   return Buffer.concat(chunks);
 }
 
-export function createServer({ db, password, whatsapp, gemini }) {
-  if (!password || password.length < 12) throw new Error('Defina uma senha com pelo menos 12 caracteres');
+export function createServer({ db, whatsapp, gemini }) {
+  const auth = createAuth(db);
+  const diagnostics = createDiagnostics({ db });
   const draftService = {
     extractRentalDraft: gemini?.extractRentalDraft || extractRentalDraft,
     extractAudioBatch: gemini?.extractAudioBatch || extractAudioBatch,
   };
-  const salt = randomBytes(16);
-  const expected = scryptSync(password, salt, 32);
-  const sessions = new Set();
   const loginAttempts = new Map();
   function receipt(input, kind, result) {
     if (input.requestId === undefined) return null;
@@ -81,14 +86,14 @@ export function createServer({ db, password, whatsapp, gemini }) {
     if (stored.kind !== kind || stored.fingerprint !== fingerprint) throw fail(409, 'Este rascunho já foi confirmado com outros dados. Confira a lista antes de cadastrar novamente.');
     return JSON.parse(stored.result);
   }
-  const wa = whatsapp || (process.env.WHATSAPP_APP_SECRET && process.env.WHATSAPP_VERIFY_TOKEN && process.env.WHATSAPP_TOKEN && process.env.WHATSAPP_PHONE_ID && process.env.GEMINI_API_KEY ? {
+  const wa = whatsapp || (process.env.WHATSAPP_APP_SECRET && process.env.WHATSAPP_VERIFY_TOKEN && process.env.WHATSAPP_TOKEN && process.env.WHATSAPP_PHONE_ID ? {
     appSecret: process.env.WHATSAPP_APP_SECRET, verifyToken: process.env.WHATSAPP_VERIFY_TOKEN,
-    token: process.env.WHATSAPP_TOKEN, phoneId: process.env.WHATSAPP_PHONE_ID, geminiKey: process.env.GEMINI_API_KEY,
+    token: process.env.WHATSAPP_TOKEN, phoneId: process.env.WHATSAPP_PHONE_ID, geminiKey: process.env.GEMINI_API_KEY, apiVersion: process.env.WHATSAPP_API_VERSION || 'v23.0',
     reminderTemplate: process.env.WHATSAPP_REMINDER_TEMPLATE || '',
     confirmationTemplate: process.env.WHATSAPP_CONFIRMATION_TEMPLATE || '',
   } : null);
   const waOutbound = whatsapp || (process.env.WHATSAPP_TOKEN && process.env.WHATSAPP_PHONE_ID ? {
-    token: process.env.WHATSAPP_TOKEN,
+    token: process.env.WHATSAPP_TOKEN, apiVersion: process.env.WHATSAPP_API_VERSION || 'v23.0',
     phoneId: process.env.WHATSAPP_PHONE_ID,
     reminderTemplate: process.env.WHATSAPP_REMINDER_TEMPLATE || '',
     confirmationTemplate: process.env.WHATSAPP_CONFIRMATION_TEMPLATE || '',
@@ -97,7 +102,15 @@ export function createServer({ db, password, whatsapp, gemini }) {
   let processing = false;
   let reminding = false;
   let confirming = false;
-  async function deliverRentalConfirmation(rental) {
+  // shortcut: a fila é local ao processo; usar coordenação no banco antes de executar múltiplos workers.
+  const confirmationJobs = new Map();
+  function deliverRentalConfirmation(rental) {
+    if (confirmationJobs.has(rental.id)) return confirmationJobs.get(rental.id);
+    const job = sendRentalConfirmation(rental).finally(() => confirmationJobs.delete(rental.id));
+    confirmationJobs.set(rental.id, job);
+    return job;
+  }
+  async function sendRentalConfirmation(rental) {
     const message = formatRentalConfirmationMessage(rental);
     const url = buildRentalConfirmationUrl(rental);
     if (!rental.whatsappOptIn) return { status: 'no_opt_in', message, url };
@@ -118,7 +131,7 @@ export function createServer({ db, password, whatsapp, gemini }) {
     if (!canSendConfirmationApi() || confirming) return;
     confirming = true;
     try {
-      const rows = db.prepare(`SELECT r.id, c.name AS costumeName, c.size, u.name AS customerName, u.phone,
+      const rows = db.prepare(`SELECT r.id, c.name AS costumeName, c.size, r.customer_name AS customerName, u.phone,
         r.pickup_date AS pickupDate, r.due_date AS dueDate, r.price_cents AS priceCents, r.status,
         r.whatsapp_opt_in AS whatsappOptIn, r.confirmation_sent_at AS confirmationSentAt,
         r.confirmation_attempts AS confirmationAttempts
@@ -172,7 +185,7 @@ export function createServer({ db, password, whatsapp, gemini }) {
               status = 'human';
               reply = 'Recebi sua mensagem. Nossa equipe vai continuar o atendimento por aqui.';
             } else if (status === 'collecting') {
-              const updated = wa.extract ? await wa.extract(message.text, lead) : await extractLead(message.text, lead, wa.geminiKey);
+              const updated = wa.extract ? await wa.extract(message.text, lead) : await extractLead(message.text, lead, wa.geminiKey, fetch, diagnostics.recordAttempt);
               Object.assign(lead, updated);
               reply = nextQuestion(lead);
               if (lead.costumeQuery && lead.size && lead.useDate && lead.mode && (lead.mode !== 'aluguel' || lead.dueDate)) status = 'ready';
@@ -224,7 +237,9 @@ export function createServer({ db, password, whatsapp, gemini }) {
         try { event = JSON.parse(raw); } catch { throw fail(400, 'JSON inválido'); }
         if (event.object !== 'whatsapp_business_account') throw fail(400, 'Evento inválido');
         for (const entry of event.entry || []) for (const change of entry.changes || []) {
+          diagnostics.webhook(change.value || {});
           for (const message of change.value?.messages || []) {
+            if (diagnostics.consumeChallenge(message)) continue;
             if (!message.id || !/^\d{10,15}$/.test(message.from || '')) continue;
             const customerName = clean(change.value?.contacts?.find(contact => contact.wa_id === message.from)?.profile?.name || '', 120);
             db.prepare('INSERT OR IGNORE INTO inbound_messages (id, phone, customer_name, text) VALUES (?, ?, ?, ?)').run(message.id, message.from, customerName, message.type === 'text' ? clean(message.text?.body, 2000) : '');
@@ -234,14 +249,14 @@ export function createServer({ db, password, whatsapp, gemini }) {
         setImmediate(() => drainMessages().catch(console.error));
         return;
       }
-      if (req.method === 'GET' && ['/','/app.js','/audio-import.js','/calendar.js','/cash.js','/styles.css','/lore-modas.png'].includes(url.pathname)) {
+      if (req.method === 'GET' && ['/','/app.js','/admin.js','/device.js','/audio-import.js','/calendar.js','/cash.js','/styles.css','/lore-modas.png'].includes(url.pathname)) {
         const file = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
-        const types = { 'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'audio-import.js': 'text/javascript; charset=utf-8', 'calendar.js': 'text/javascript; charset=utf-8', 'cash.js': 'text/javascript; charset=utf-8', 'styles.css': 'text/css; charset=utf-8', 'lore-modas.png': 'image/png' };
+        const types = { 'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'admin.js': 'text/javascript; charset=utf-8', 'device.js': 'text/javascript; charset=utf-8', 'audio-import.js': 'text/javascript; charset=utf-8', 'calendar.js': 'text/javascript; charset=utf-8', 'cash.js': 'text/javascript; charset=utf-8', 'styles.css': 'text/css; charset=utf-8', 'lore-modas.png': 'image/png' };
         res.writeHead(200, {
           'content-type': types[file],
           'cache-control': file === 'lore-modas.png' ? 'public, max-age=3600' : 'no-cache',
           'x-content-type-options': 'nosniff',
-          'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; media-src 'self' blob:; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'",
+          'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; media-src 'self' blob:; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
         });
         res.end(await readFile(join(publicDir, file)));
         return;
@@ -257,34 +272,45 @@ export function createServer({ db, password, whatsapp, gemini }) {
         const attempts = loginAttempts.get(ip) || { count: 0, until: now + 900_000 };
         if (attempts.until < now) { attempts.count = 0; attempts.until = now + 900_000; }
         if (attempts.count >= 5) throw fail(429, 'Muitas tentativas. Tente novamente em 15 minutos');
-        const input = await body(req);
-        const actual = scryptSync(String(input.password || '').slice(0, 256), salt, 32);
-        if (!timingSafeEqual(actual, expected)) {
-          attempts.count++;
-          loginAttempts.set(ip, attempts);
-          throw fail(401, 'Senha incorreta');
-        }
+        attempts.count++;
+        loginAttempts.set(ip, attempts);
+        const input = await body(req, 4096);
+        if (req.headers.origin && ![`http://${req.headers.host}`, `https://${req.headers.host}`].includes(req.headers.origin)) throw fail(403, 'Origem não permitida');
+        const { sid, csrf, user } = auth.login(input.username, input.password);
         loginAttempts.delete(ip);
-        const sid = randomBytes(32).toString('hex');
-        sessions.add(sid);
         const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
-        send(res, 200, { ok: true }, { 'set-cookie': `sid=${sid}; HttpOnly; SameSite=Strict; Path=/${secure}` });
+        send(res, 200, { ok: true, user, csrf }, { 'set-cookie': `sid=${sid}; HttpOnly; SameSite=Strict; Path=/${secure}` });
         return;
       }
       if (!url.pathname.startsWith('/api/')) throw fail(404, 'Página não encontrada');
       const sid = /(?:^|;\s*)sid=([a-f0-9]{64})(?:;|$)/.exec(req.headers.cookie || '')?.[1];
-      if (!sessions.has(sid)) throw fail(401, 'Entre para continuar');
+      const session = auth.session(sid);
+      if (!session) throw fail(401, 'Entre para continuar');
       if (req.method !== 'GET' && req.headers.origin && req.headers.origin !== `http://${req.headers.host}` && req.headers.origin !== `https://${req.headers.host}`) throw fail(403, 'Origem não permitida');
+      if (req.method !== 'GET' && req.headers['x-csrf-token'] !== session.csrf) throw fail(403, 'Sessão inválida. Atualize a página.');
       if (req.method === 'POST' && url.pathname === '/api/logout') {
-        sessions.delete(sid);
+        auth.logout(sid);
         send(res, 200, { ok: true }, { 'set-cookie': 'sid=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0' });
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/api/me') { send(res, 200, session); return; }
+      if (req.method === 'POST' && url.pathname === '/api/password') {
+        const input = await body(req, 4096);
+        auth.changePassword(session.user.id, input.currentPassword, input.newPassword);
+        send(res, 200, { ok: true }, { 'set-cookie': 'sid=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0' });
+        return;
+      }
+      if (session.user.mustChange) throw fail(403, 'Altere sua senha temporária para continuar');
+      if (url.pathname.startsWith('/api/admin/')) {
+        if (session.user.role !== 'admin') throw fail(403, 'Acesso exclusivo do administrador');
+        await handleAdmin({ req, res, url, db, auth, diagnostics, user: session.user, body, send });
         return;
       }
       if (req.method === 'POST' && url.pathname === '/api/drafts/extract') {
         const input = await body(req, 20_500_000);
         if (!process.env.GEMINI_API_KEY) throw fail(503, 'Gemini não configurado');
         try {
-          send(res, 200, await draftService.extractRentalDraft({ mimeType: input.mimeType, fileName: input.fileName, data: input.data, apiKey: process.env.GEMINI_API_KEY }));
+          send(res, 200, await draftService.extractRentalDraft({ mimeType: input.mimeType, fileName: input.fileName, data: input.data, apiKey: process.env.GEMINI_API_KEY, onAttempt: diagnostics.recordAttempt }));
         } catch (error) {
           const status = error.httpStatus || (error.message.startsWith('Formato') ? 422 : 502);
           console.error('[drafts/extract] falha:', status, error.message);
@@ -297,7 +323,7 @@ export function createServer({ db, password, whatsapp, gemini }) {
         if (!['costumes', 'rentals'].includes(input.kind)) throw fail(422, 'Tipo de importação inválido');
         if (!process.env.GEMINI_API_KEY) throw fail(503, 'Gemini não configurado');
         try {
-          send(res, 200, await draftService.extractAudioBatch({ kind: input.kind, mimeType: input.mimeType, fileName: input.fileName, data: input.data, apiKey: process.env.GEMINI_API_KEY }));
+          send(res, 200, await draftService.extractAudioBatch({ kind: input.kind, mimeType: input.mimeType, fileName: input.fileName, data: input.data, apiKey: process.env.GEMINI_API_KEY, onAttempt: diagnostics.recordAttempt }));
         } catch (error) {
           const status = error.httpStatus || (error.message.startsWith('Formato') ? 422 : 502);
           console.error('[drafts/audio] falha:', status, error.message);
@@ -323,9 +349,9 @@ export function createServer({ db, password, whatsapp, gemini }) {
         const date = url.searchParams.get('date') || today();
         if (!validDate(date)) throw fail(422, 'Data inválida');
         const payments = db.prepare(`SELECT p.id, p.rental_id AS rentalId, p.amount_cents AS amountCents, p.received_date AS receivedDate, p.method,
-          c.name AS costumeName, c.size, u.name AS customerName FROM payments p JOIN rentals r ON r.id=p.rental_id
+          c.name AS costumeName, c.size, r.customer_name AS customerName FROM payments p JOIN rentals r ON r.id=p.rental_id
           JOIN costumes c ON c.id=r.costume_id JOIN customers u ON u.id=r.customer_id WHERE p.received_date=? ORDER BY p.id DESC`).all(date);
-        const pending = db.prepare(`SELECT r.id, r.price_cents AS priceCents, r.pickup_date AS pickupDate, c.name AS costumeName, c.size, u.name AS customerName
+        const pending = db.prepare(`SELECT r.id, r.price_cents AS priceCents, r.pickup_date AS pickupDate, c.name AS costumeName, c.size, r.customer_name AS customerName
           FROM rentals r JOIN costumes c ON c.id=r.costume_id JOIN customers u ON u.id=r.customer_id
           LEFT JOIN payments p ON p.rental_id=r.id WHERE p.id IS NULL AND r.status!='cancelled' AND r.pickup_date<=? ORDER BY r.pickup_date DESC, r.id DESC`).all(date);
         const expectedCents = db.prepare("SELECT COALESCE(SUM(price_cents),0) AS total FROM rentals WHERE pickup_date=? AND status!='cancelled'").get(date).total;
@@ -391,7 +417,7 @@ export function createServer({ db, password, whatsapp, gemini }) {
       }
       if (req.method === 'GET' && url.pathname === '/api/rentals') {
         const apiReady = canSendConfirmationApi();
-        const rows = db.prepare(`SELECT r.id, c.name AS costumeName, c.size, u.name AS customerName, u.phone,
+        const rows = db.prepare(`SELECT r.id, c.name AS costumeName, c.size, r.customer_name AS customerName, u.phone,
           r.pickup_date AS pickupDate, r.due_date AS dueDate, r.returned_date AS returnedDate,
           r.price_cents AS priceCents, r.late_fee_cents AS lateFeeCents, r.status,
           r.whatsapp_opt_in AS whatsappOptIn, r.confirmation_sent_at AS confirmationSentAt,
@@ -428,8 +454,8 @@ export function createServer({ db, password, whatsapp, gemini }) {
           db.prepare('INSERT INTO customers (name, phone) VALUES (?, ?) ON CONFLICT(phone) DO UPDATE SET name=excluded.name').run(customerName, phone);
           const customerId = db.prepare('SELECT id FROM customers WHERE phone=?').get(phone).id;
           const whatsappOptIn = input.whatsappOptIn === true;
-          const result = db.prepare(`INSERT INTO rentals (costume_id, customer_id, pickup_date, due_date, price_cents, whatsapp_opt_in, status)
-            VALUES (?, ?, ?, ?, ?, ?, 'confirmed')`).run(costumeId, customerId, input.pickupDate, input.dueDate, priceCents, whatsappOptIn ? 1 : 0);
+          const result = db.prepare(`INSERT INTO rentals (costume_id, customer_id, pickup_date, due_date, price_cents, whatsapp_opt_in, customer_name, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'confirmed')`).run(costumeId, customerId, input.pickupDate, input.dueDate, priceCents, whatsappOptIn ? 1 : 0, customerName);
           const id = Number(result.lastInsertRowid);
           receipt(input, 'rentals', { id });
           db.exec('COMMIT');
@@ -454,7 +480,7 @@ export function createServer({ db, password, whatsapp, gemini }) {
       }
       const notifyMatch = /^\/api\/rentals\/(\d+)\/notify$/.exec(url.pathname);
       if (req.method === 'POST' && notifyMatch) {
-        const rental = db.prepare(`SELECT r.id, c.name AS costumeName, c.size, u.name AS customerName, u.phone,
+        const rental = db.prepare(`SELECT r.id, c.name AS costumeName, c.size, r.customer_name AS customerName, u.phone,
           r.pickup_date AS pickupDate, r.due_date AS dueDate, r.price_cents AS priceCents, r.status,
           r.whatsapp_opt_in AS whatsappOptIn, r.confirmation_sent_at AS confirmationSentAt,
           r.confirmation_attempts AS confirmationAttempts
@@ -484,7 +510,7 @@ export function createServer({ db, password, whatsapp, gemini }) {
       if (req.method === 'GET' && url.pathname === '/api/dashboard') {
         const date = url.searchParams.get('date') || today();
         if (!validDate(date)) throw fail(422, 'Data inválida');
-        const rows = db.prepare(`SELECT r.id, c.name AS costumeName, c.size, u.name AS customerName, u.phone,
+        const rows = db.prepare(`SELECT r.id, c.name AS costumeName, c.size, r.customer_name AS customerName, u.phone,
           r.pickup_date AS pickupDate, r.due_date AS dueDate, r.price_cents AS priceCents
           FROM rentals r JOIN costumes c ON c.id=r.costume_id JOIN customers u ON u.id=r.customer_id
           WHERE r.status='confirmed' ORDER BY r.due_date, r.id`).all();
@@ -497,6 +523,17 @@ export function createServer({ db, password, whatsapp, gemini }) {
       if (!error.status) console.error(error);
     }
   });
+  let backupRunning = false;
+  const scheduledBackup = async () => {
+    if (!process.env.BACKUP_DIR || backupRunning) return;
+    if (db.prepare("SELECT id FROM backup_runs WHERE created_at>datetime('now','-1 day') LIMIT 1").get()) return;
+    backupRunning = true;
+    try { await createVerifiedBackup(db, process.env.BACKUP_DIR); }
+    catch { console.error('Backup automático falhou; verifique o diretório de destino.'); }
+    finally { backupRunning = false; }
+  };
+  const backupTimer = process.env.BACKUP_DIR ? setInterval(scheduledBackup, 3_600_000).unref() : null;
+  if (backupTimer) { server.on('listening', scheduledBackup); server.on('close', () => clearInterval(backupTimer)); }
   if (retryTimer) server.on('close', () => clearInterval(retryTimer));
   if (reminderTimer) server.on('close', () => clearInterval(reminderTimer));
   if (wa) setImmediate(() => drainMessages().catch(console.error));
@@ -506,8 +543,5 @@ export function createServer({ db, password, whatsapp, gemini }) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const path = process.env.DB_PATH || join(dirname(fileURLToPath(import.meta.url)), '../data/fantasias.sqlite');
-  if (!process.env.ADMIN_PASSWORD) throw new Error('Defina ADMIN_PASSWORD com pelo menos 12 caracteres');
-  mkdirSync(dirname(path), { recursive: true });
-  createServer({ db: createDatabase(path), password: process.env.ADMIN_PASSWORD }).listen(Number(process.env.PORT || 3000), '127.0.0.1', () => console.log('Painel em http://127.0.0.1:' + (process.env.PORT || 3000)));
+  createServer({ db: await openDatabase() }).listen(Number(process.env.PORT || 3000), '127.0.0.1', () => console.log('Painel em http://127.0.0.1:' + (process.env.PORT || 3000)));
 }
