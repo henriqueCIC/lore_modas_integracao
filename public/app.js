@@ -1,6 +1,8 @@
+import './device.js';
+import { mountAdmin } from './admin.js';
 import { mountCalendar } from './calendar.js';
 import { mountCash } from './cash.js';
-import { mountAudioImports } from './audio-import.js';
+import { mountAudioImports, findMatchingCostume } from './audio-import.js';
 const $ = selector => document.querySelector(selector);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 const money = cents => (cents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -12,9 +14,10 @@ const localDate = () => {
 };
 let costumes = [], rentals = [], leads = [];
 let calendar, cash, audioImports;
+let csrf = '', currentUser;
 
 async function api(path, options = {}) {
-  const response = await fetch(path, { credentials: 'same-origin', headers: { 'content-type': 'application/json' }, ...options });
+  const response = await fetch(path, { credentials: 'same-origin', headers: { 'content-type': 'application/json', 'x-csrf-token': csrf }, ...options });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || 'Não foi possível concluir a ação');
   return data;
@@ -27,6 +30,28 @@ function toast(message) {
 }
 function showLogin() { $('#app').hidden = true; $('#login').hidden = false; }
 function showApp() { $('#login').hidden = true; $('#app').hidden = false; }
+function acceptSession(session) {
+  csrf = session.csrf;
+  currentUser = session.user;
+  $('#admin-link').hidden = currentUser.role !== 'admin';
+  $('#account-name').textContent = currentUser.username;
+  if (currentUser.mustChange) {
+    $('#password-note').textContent = 'Sua senha é temporária. Defina uma nova senha para continuar.';
+    $('#password-dialog').showModal();
+  }
+}
+$('#change-password').addEventListener('click', () => $('#password-dialog').showModal());
+$('#password-dialog').addEventListener('cancel', event => { if (currentUser?.mustChange) event.preventDefault(); });
+$('#password-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget, button = form.querySelector('[type=submit]');
+  button.disabled = true;
+  try {
+    await api('/api/password', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(form))) });
+    location.reload();
+  } catch (error) { $('#password-error').textContent = error.message; }
+  finally { button.disabled = false; }
+});
 function showWhatsAppNotice(customerName, confirmation, rentalId) {
   const box = $('#whatsapp-notice');
   if (!box || !confirmation?.message) return;
@@ -99,14 +124,17 @@ async function refreshDashboard() {
   list('#due-list', data.due, true);
   list('#overdue-list', data.overdue, true);
 }
+const admin = mountAdmin({ api, esc, toast });
 function navigate(view) {
-  const target = document.getElementById(`view-${view}`) ? view : 'hoje';
+  const target = document.getElementById(`view-${view}`) && (view !== 'admin' || currentUser?.role === 'admin') ? view : 'hoje';
   document.querySelectorAll('.view').forEach(el => el.hidden = el.id !== `view-${target}`);
   document.querySelectorAll('.nav-link').forEach(el => el.classList.toggle('active', el.dataset.view === target));
+  if (target === 'admin' && !currentUser.mustChange) admin.refresh();
 }
 function openRental({ allowEmptyCostumes = false } = {}) {
   if (!allowEmptyCostumes && !costumes.length) { toast('Cadastre uma fantasia antes de registrar um aluguel.'); location.hash = 'fantasias'; navigate('fantasias'); return; }
   $('#rental-form').reset();
+  $('#rental-form').dataset.requestId = crypto.randomUUID();
   $('#draft-note').textContent = '';
   $('#pickup-date').value = localDate();
   $('#due-date').value = localDate();
@@ -126,11 +154,11 @@ async function importMedia(file) {
   if (draft.dueDate) form.elements.dueDate.value = draft.dueDate;
   form.elements.price.value = draft.priceCents === null ? '' : (draft.priceCents / 100).toFixed(2);
   const norm = v => String(v || '').trim().toLocaleLowerCase('pt-BR');
-  const match = costumes.find(c => norm(c.name) === norm(draft.costumeName) && (!norm(draft.size) || norm(c.size) === norm(draft.size)));
+  const match = findMatchingCostume(costumes, draft.costumeName, draft.size);
   form.elements.costumeId.value = match?.id || '';
   $('#draft-note').textContent = match ? 'Rascunho preenchido. Confira cada campo antes de confirmar.' : `Fantasia lida: ${draft.costumeName || 'não identificada'} · ${draft.size || 'tamanho não identificado'}. Cadastre no estoque na janela aberta ou selecione abaixo.`;
   toast('Rascunho preenchido. Nada foi salvo ainda.');
-  if (!match) {
+  if (!match && !costumes.some(c => norm(c.name) === norm(draft.costumeName) && !norm(draft.size))) {
     audioImports?.openQuickCostume?.({
       costumeName: draft.costumeName || '',
       preferredSize: draft.size || '',
@@ -165,14 +193,16 @@ $('#login-form').addEventListener('submit', async event => {
   event.preventDefault();
   $('#login-error').textContent = '';
   try {
-    await api('/api/login', { method: 'POST', body: JSON.stringify({ password: $('#password').value }) });
+    const session = await api('/api/login', { method: 'POST', body: JSON.stringify({ username: $('#username').value, password: $('#password').value }) });
+    acceptSession(session);
     $('#password').value = '';
     showApp();
+    if (currentUser.mustChange) return;
     navigate(location.hash.slice(1) || 'hoje');
     await refresh();
   } catch (error) { $('#login-error').textContent = error.message; }
 });
-$('#logout').addEventListener('click', async () => { await api('/api/logout', { method: 'POST' }); showLogin(); });
+$('#logout').addEventListener('click', async () => { await api('/api/logout', { method: 'POST' }); location.reload(); });
 document.querySelectorAll('.nav-link').forEach(link => link.addEventListener('click', () => navigate(link.dataset.view)));
 window.addEventListener('hashchange', () => navigate(location.hash.slice(1) || 'hoje'));
 $('#dashboard-date').addEventListener('change', () => refreshDashboard().catch(error => toast(error.message)));
@@ -204,7 +234,7 @@ $('#costume-form').addEventListener('submit', async event => {
   if (button.disabled) return;
   button.disabled = true;
   const data = Object.fromEntries(new FormData(form));
-  try { await api('/api/costumes', { method: 'POST', body: JSON.stringify(data) }); form.reset(); toast('Fantasia cadastrada.'); await refresh(); }
+  try { await api('/api/costumes', { method: 'POST', body: JSON.stringify({ ...data, requestId: form.dataset.requestId ||= crypto.randomUUID() }) }); delete form.dataset.requestId; form.reset(); toast('Fantasia cadastrada.'); await refresh(); }
   catch (error) { toast(error.message); }
   finally { button.disabled = false; }
 });
@@ -217,7 +247,7 @@ $('#rental-form').addEventListener('submit', async event => {
   const priceCents = Math.round(Number(data.price) * 100);
   delete data.price;
   try {
-    const created = await api('/api/rentals', { method: 'POST', body: JSON.stringify({ ...data, whatsappOptIn: data.whatsappOptIn === 'on', priceCents }) });
+    const created = await api('/api/rentals', { method: 'POST', body: JSON.stringify({ ...data, requestId: form.dataset.requestId ||= crypto.randomUUID(), whatsappOptIn: data.whatsappOptIn === 'on', priceCents }) });
     $('#rental-dialog').close();
     toast(created?.whatsappConfirmation?.status === 'sent' ? 'Aluguel registrado e aviso enviado no WhatsApp.' : 'Aluguel registrado.');
     if (created?.whatsappConfirmation) showWhatsAppNotice(data.customerName, created.whatsappConfirmation, created.id);
@@ -246,5 +276,5 @@ calendar = mountCalendar($('#agenda-calendar'), { api, initialDate: localDate(),
 cash = mountCash({ api, esc, money, initialDate: localDate(), toast });
 $('#today-label').textContent = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'full', timeZone: 'America/Bahia' }).format(new Date());
 $('#dashboard-date').value = localDate();
-try { await refresh(); showApp(); navigate(location.hash.slice(1) || 'hoje'); }
+try { acceptSession(await api('/api/me')); if (!currentUser.mustChange) await refresh(); showApp(); navigate(location.hash.slice(1) || 'hoje'); }
 catch (error) { if (error.message === 'Entre para continuar') showLogin(); else { showLogin(); $('#login-error').textContent = error.message; } }

@@ -28,14 +28,14 @@ export function nextQuestion(lead) {
   return `Obrigada! Anotei ${lead.costumeQuery}, tamanho ${lead.size}, para ${lead.useDate}${lead.mode === 'aluguel' ? `, com devolução prevista em ${lead.dueDate}` : ''}. Nossa equipe vai confirmar disponibilidade e valores por aqui. Se precisar, escreva “atendente”.`;
 }
 
-export async function extractLead(message, current, apiKey, fetchImpl = fetch) {
+export async function extractLead(message, current, apiKey, fetchImpl = fetch, onAttempt) {
   const parsed = await callGeminiJson({
     apiKey,
     contents: [{ parts: [{ text: `Extraia somente os dados que o cliente informou nesta última mensagem sobre uma fantasia. Não invente. Use null para ausentes. mode deve ser aluguel ou compra. Datas AAAA-MM-DD; datas relativas apenas se inequívocas em Salvador, hoje ${new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Bahia' }).format(new Date())}. Estado anterior (para contexto, não copie dados dele): ${JSON.stringify(current)}. Mensagem: ${message}` }] }],
     schema: { type: 'OBJECT', properties: {
       costumeQuery: { type: 'STRING', nullable: true }, size: { type: 'STRING', nullable: true }, useDate: { type: 'STRING', nullable: true }, dueDate: { type: 'STRING', nullable: true }, mode: { type: 'STRING', enum: ['aluguel', 'compra'], nullable: true },
     }, required: ['costumeQuery', 'size', 'useDate', 'dueDate', 'mode'] },
-    task: 'whatsapp-lead',
+    task: 'whatsapp-lead', onAttempt,
     fetchImpl,
     timeoutMs: 20_000,
   });

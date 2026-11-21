@@ -3,7 +3,7 @@ const MAX_AUDIO_BYTES = 14_000_000;
 const ACCEPTED_AUDIO = 'audio/*,.ogg,.opus,.mp3,.m4a,.mp4,.wav,.webm,.aac,.flac,.aiff,.aif';
 const QUICK_SIZES = ['PP', 'P', 'M', 'G', 'GG', 'Infantil', 'Único'];
 
-function findMatchingCostume(costumes, readName, readSize) {
+export function findMatchingCostume(costumes, readName, readSize) {
   const normName = normalize(readName);
   const normSize = normalize(readSize);
   if (!normName) return null;
@@ -13,7 +13,7 @@ function findMatchingCostume(costumes, readName, readSize) {
   }
   if (!normSize) {
     const byName = costumes.filter(c => normalize(c.name) === normName);
-    if (byName.length >= 1) return byName[0];
+    if (byName.length === 1) return byName[0];
   }
   return null;
 }
@@ -151,6 +151,7 @@ function ensureQuickCostumeDialog({ api, esc, toast, refresh, getCostumes }) {
   }
 
   function dismiss() {
+    if (submitBtn.disabled) return;
     const onCancel = currentContext?.onCancel;
     if (dialog.open) dialog.close();
     onCancel?.();
@@ -201,17 +202,23 @@ function ensureQuickCostumeDialog({ api, esc, toast, refresh, getCostumes }) {
     submitBtn.disabled = true;
     cancelBtn.disabled = true;
     try {
+      const ctx = currentContext;
+      if (!ctx.writes) {
+        ctx.writes = entries.map(entry => {
+          const existing = getCostumes().find(c => normalize(c.name) === normalize(costumeName) && normalize(c.size) === normalize(entry.size));
+          return { payload: existing
+            ? { existingId: existing.id, name: existing.name, size: existing.size, quantity: entry.quantity, requestId: crypto.randomUUID() }
+            : { name: costumeName, size: entry.size, quantity: entry.quantity, requestId: crypto.randomUUID() } };
+        });
+        for (const field of form.querySelectorAll('input')) field.readOnly = true;
+        for (const button of form.querySelectorAll('[data-size-chip], [data-qc-add-row], [data-qc-remove-row]')) button.disabled = true;
+      }
       const savedCostumes = [];
-      for (const entry of entries) {
-        const existing = getCostumes().find(c => normalize(c.name) === normalize(costumeName) && normalize(c.size) === normalize(entry.size));
-        const payload = existing
-          ? { existingId: existing.id, name: existing.name, size: existing.size, quantity: entry.quantity, requestId: crypto.randomUUID() }
-          : { name: costumeName, size: entry.size, quantity: entry.quantity, requestId: crypto.randomUUID() };
-        const saved = await api('/api/costumes', { method: 'POST', body: JSON.stringify(payload) });
-        savedCostumes.push(saved);
+      for (const write of ctx.writes) {
+        if (!write.result) write.result = await api('/api/costumes', { method: 'POST', body: JSON.stringify(write.payload) });
+        savedCostumes.push(write.result);
       }
       await refresh();
-      const ctx = currentContext;
       if (dialog.open) dialog.close();
       const preferredSize = ctx.preferredSize || '';
       const chosen = savedCostumes.find(c => normalize(c.size) === normalize(preferredSize)) || savedCostumes[0];
@@ -238,6 +245,8 @@ function ensureQuickCostumeDialog({ api, esc, toast, refresh, getCostumes }) {
       : cleanName
         ? `A fantasia “${cleanName}” ainda não está no estoque. Informe somente quais tamanhos e quantas fantasias tem disponíveis para inserir no inventário:`
         : 'A fantasia citada no áudio não está no estoque. Informe o nome, quais tamanhos e quantas fantasias tem disponíveis:';
+    nameInput.readOnly = false;
+    for (const button of form.querySelectorAll('[data-size-chip], [data-qc-add-row]')) button.disabled = false;
     nameInput.value = cleanName;
     nameWrap.hidden = Boolean(cleanName);
     errorEl.textContent = '';
@@ -307,7 +316,7 @@ function openSavedAudioDb() {
         }
       };
       req.onsuccess = () => resolve(req.result);
-      req.onerror = () => resolve(null);
+      req.onerror = req.onblocked = () => resolve(null);
     } catch {
       resolve(null);
     }
@@ -316,8 +325,8 @@ function openSavedAudioDb() {
 
 async function persistSavedAudio(record) {
   const db = await openSavedAudioDb();
-  if (!db) return;
-  await new Promise(resolve => {
+  if (!db) return false;
+  return new Promise(resolve => {
     try {
       const tx = db.transaction(SAVED_AUDIO_STORE, 'readwrite');
       tx.objectStore(SAVED_AUDIO_STORE).put({
@@ -330,11 +339,11 @@ async function persistSavedAudio(record) {
         createdAt: record.createdAt,
         errorMessage: record.errorMessage,
       });
-      tx.oncomplete = () => { db.close(); resolve(); };
-      tx.onerror = () => { db.close(); resolve(); };
+      tx.oncomplete = () => { db.close(); resolve(true); };
+      tx.onerror = tx.onabort = () => { db.close(); resolve(false); };
     } catch {
       try { db.close(); } catch {}
-      resolve();
+      resolve(false);
     }
   });
 }
@@ -573,9 +582,10 @@ export function mountAudioImports({ api, esc, toast, refresh, getCostumes, onRen
         };
 
         form._syncMissingBox = () => {
-          missingBox.hidden = Boolean(select.value);
+          missingBox.hidden = Boolean(select.value) || (!readSize && getCostumes().some(c => normalize(c.name) === normalize(readName)));
         };
         form._promptQuickCostume = promptQuickCostume;
+        form._syncMissingBox();
 
         openQuickBtn.addEventListener('click', () => promptQuickCostume());
 
@@ -705,7 +715,8 @@ export function mountAudioImports({ api, esc, toast, refresh, getCostumes, onRen
       const timeStr = target.createdAt
         ? new Date(target.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
         : '';
-      card.querySelector('[data-saved-meta]').textContent = `${target.fileName || 'gravacao.webm'} · ${formatKb(target.size)}${timeStr ? ` · guardado às ${timeStr}` : ''} · só sai daqui quando for enviado`;
+      card.querySelector('.saved-audio-title').textContent = target.durable === false ? 'Áudio apenas nesta aba — não feche' : 'Áudio guardado para reenvio';
+      card.querySelector('[data-saved-meta]').textContent = `${target.fileName || 'gravacao.webm'} · ${formatKb(target.size)}${timeStr ? ` · ${timeStr}` : ''}`;
       card.querySelector('[data-saved-error]').textContent = target.errorMessage;
       const audioEl = card.querySelector('[data-saved-preview]');
       if (target.previewUrl) {
@@ -732,7 +743,8 @@ export function mountAudioImports({ api, esc, toast, refresh, getCostumes, onRen
       setRetryButtonsDisabled(true, savedRecord?.id || '');
       say(savedRecord ? 'Reenviando o áudio guardado para o Gemini…' : 'Enviando e transcrevendo o áudio com Gemini…');
       let base64 = savedRecord?.base64 || '';
-      const mimeType = savedRecord?.mimeType || file?.type || 'audio/webm';
+      const mimeType = savedRecord?.mimeType || file?.type || '';
+      let durable = false;
       const fileName = savedRecord?.fileName || file?.name || 'gravacao.webm';
       try {
         if (!base64) {
@@ -744,6 +756,14 @@ export function mountAudioImports({ api, esc, toast, refresh, getCostumes, onRen
           });
           base64 = String(dataUrl).split(',')[1] || '';
         }
+        savedRecord = upsertSavedAudioCard(savedRecord || {
+          id: crypto.randomUUID(), kind, fileName, mimeType, size: sizeBytes, base64, blob: file,
+          createdAt: Date.now(), errorMessage: 'Envio em andamento. Áudio preservado para reenvio.',
+        });
+        durable = await persistSavedAudio(savedRecord);
+        savedRecord.durable = durable;
+        upsertSavedAudioCard(savedRecord);
+        if (!durable) throw new Error('Não foi possível guardar o áudio neste navegador. Mantenha esta página aberta e libere espaço antes de reenviar.');
         const result = await api('/api/drafts/audio', {
           method: 'POST',
           body: JSON.stringify({ kind, mimeType, fileName, data: base64 }),
@@ -786,7 +806,7 @@ export function mountAudioImports({ api, esc, toast, refresh, getCostumes, onRen
         say(result.items.length ? `${result.items.length} rascunho(s) pronto(s) para revisão. Nada foi salvo ainda.` : 'Nenhum registro identificado. Confira a transcrição e tente um áudio mais claro.');
         if (!inventory) {
           for (const form of draftList.querySelectorAll('form.audio-draft')) {
-            if (!form.elements.costumeId.value) {
+            if (!form.elements.costumeId.value && !getCostumes().some(c => normalize(c.name) === normalize(form.dataset.readName) && !form.dataset.readSize)) {
               form._promptQuickCostume?.();
             }
           }
@@ -804,8 +824,8 @@ export function mountAudioImports({ api, esc, toast, refresh, getCostumes, onRen
             createdAt: Date.now(),
             errorMessage: error.message,
           });
-          persistSavedAudio(record);
-          say(`${error.message} O áudio foi guardado abaixo — clique em Reenviar áudio para tentar novamente sem precisar gravar de novo.`);
+          if (durable) await persistSavedAudio(record);
+          say(durable ? `${error.message} O áudio está guardado para reenvio.` : `${error.message} O áudio está apenas nesta aba e será perdido ao fechá-la.`);
         } else {
           say(error.message);
         }

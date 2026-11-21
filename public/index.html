@@ -17,6 +17,7 @@
       <span class="eyebrow">LORE MODAS / ACESSO PRIVADO</span>
       <h1>Sua loja,<br>em ordem.</h1>
       <p>Entre para acompanhar fantasias, aluguéis e devoluções.</p>
+      <label for="username">Usuário</label><input id="username" name="username" autocomplete="username" required maxlength="40">
       <label for="password">Senha de acesso</label>
       <input id="password" name="password" type="password" autocomplete="current-password" required minlength="12">
       <button type="submit">Entrar no painel <span aria-hidden="true">↗</span></button>
@@ -32,8 +33,10 @@
         <a href="#pedidos" class="nav-link" data-view="pedidos">Pedidos</a>
         <a href="#fantasias" class="nav-link" data-view="fantasias">Fantasias</a>
         <a href="#caixa" class="nav-link" data-view="caixa">Caixa</a>
+        <a href="#device" class="nav-link" data-view="device">Este dispositivo</a>
+        <a href="#admin" class="nav-link" data-view="admin" id="admin-link" hidden>Administração</a>
       </nav>
-      <div class="sidebar-foot"><span>Versão inicial · uso local</span><button id="logout" class="text-button">Sair</button></div>
+      <div class="sidebar-foot"><span id="account-name"></span><button id="change-password" class="text-button">Alterar minha senha</button><button id="logout" class="text-button">Sair</button></div>
     </aside>
     <div class="workspace">
       <header class="topbar"><span>LORE MODAS / CONTROLE DA LOJA</span><span id="today-label"></span></header>
@@ -67,9 +70,19 @@
           <details id="cash-date-picker" class="panel cash-date-picker"><summary id="cash-date-label">Escolher dia do caixa</summary><div id="cash-calendar"></div></details>
           <div id="cash-content"></div>
         </section>
+        <section id="view-device" class="view" hidden><div class="page-head"><div><span class="eyebrow">DIAGNÓSTICO LOCAL</span><h1>Este dispositivo.</h1><p>Confira o microfone e o armazenamento de áudios neste navegador.</p></div></div><section class="panel"><div class="row-actions"><button class="primary" data-microphone>Gravar teste de 3 segundos</button><button class="small-button" data-storage>Testar armazenamento</button></div><p role="status"></p><audio controls hidden></audio><p class="hint">O teste fica apenas neste dispositivo. O navegador pode apagar dados locais quando você limpa o histórico ou usa uma janela privada.</p></section></section>
+        <section id="view-admin" class="view" hidden>
+          <div class="page-head"><div><span class="eyebrow">ADMINISTRAÇÃO</span><h1>Acessos e conexões.</h1><p>Gerencie a conta da Lore e confira os serviços da loja.</p></div><button class="primary" data-refresh>Atualizar</button></div>
+          <section class="panel"><h2>Contas</h2><div data-users></div></section>
+          <div class="dashboard-grid" data-integrations></div>
+          <details class="panel"><summary>Uso recente do Gemini</summary><p>Tokens informados pelo provedor. Este histórico não representa o saldo da cota nem o valor da fatura.</p><pre class="admin-log" data-usage></pre></details>
+          <details class="panel"><summary>Histórico administrativo</summary><pre class="admin-log" data-events></pre></details>
+        </section>
       </main>
     </div>
   </div>
+  <dialog id="temporary-password"><form method="dialog" class="dialog-form"><h2>Senha temporária</h2><p>Copie e entregue à pessoa por um canal privado. Ela deverá trocar a senha ao entrar. Este valor só aparece agora.</p><output></output><button class="primary">Fechar</button></form></dialog>
+  <dialog id="password-dialog" aria-labelledby="password-title"><form id="password-form" class="dialog-form"><h2 id="password-title">Alterar senha</h2><p id="password-note">Após alterar, entre novamente com a nova senha.</p><label>Senha atual<input type="password" name="currentPassword" required autocomplete="current-password"></label><label>Nova senha<input type="password" name="newPassword" required minlength="12" maxlength="256" autocomplete="new-password"></label><p id="password-error" role="alert"></p><button type="submit" class="primary">Salvar nova senha</button></form></dialog>
   <dialog id="rental-dialog">
     <form id="rental-form" class="dialog-form">
       <div class="dialog-head"><div><span class="eyebrow">NOVA RESERVA</span><h2>Registrar aluguel</h2></div><button type="button" class="close-button" data-close aria-label="Fechar">×</button></div>

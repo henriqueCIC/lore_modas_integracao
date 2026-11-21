@@ -1,0 +1,1 @@
+`diagnostic.wav`: fala sintética em português, “Uma fantasia de pirata, tamanho M.” Gerada localmente com a voz Luciana do macOS, PCM 16 bits, 16 kHz. Não contém voz nem dados de clientes. Usada somente pelo teste manual de áudio Gemini; não requer ferramenta de síntese em produção.

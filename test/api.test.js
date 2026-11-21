@@ -2,20 +2,26 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDatabase } from '../src/db.js';
 import { createServer } from '../src/server.js';
+import { createUser } from '../src/auth.js';
 import { createHmac } from 'node:crypto';
 
 async function fixture(options = {}) {
   const db = createDatabase(':memory:');
-  const server = createServer({ db, password: 'segredo-de-teste', ...options });
+  createUser(db, { username: 'admin', password: 'segredo-de-teste', role: 'admin' });
+  const server = createServer({ db, ...options });
+  let csrf = '';
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   async function request(path, method = 'GET', body, cookie = '') {
+    if (path === '/api/login') body = { username: 'admin', ...body };
     const res = await fetch(base + path, {
       method,
-      headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...(cookie ? { cookie } : {}) },
+      headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...(cookie ? { cookie, 'x-csrf-token': csrf } : {}) },
       body: body ? JSON.stringify(body) : undefined,
     });
-    return { status: res.status, data: await res.json(), cookie: res.headers.get('set-cookie')?.split(';')[0] };
+    const data = await res.json();
+    if (data.csrf) csrf = data.csrf;
+    return { status: res.status, data, cookie: res.headers.get('set-cookie')?.split(';')[0] };
   }
   return { db, server, request, close: () => new Promise(resolve => server.close(resolve)) };
 }
@@ -410,4 +416,56 @@ test('fluxo de áudio de aluguel com fantasia ausente permite cadastrar no acerv
     await f.close();
     f.db.close();
   }
+});
+
+test('novo nome no mesmo telefone preserva nome contratado anteriormente', async () => {
+  const f = await fixture();
+  try {
+    const { cookie } = await f.request('/api/login', 'POST', { password: 'segredo-de-teste' });
+    const { data: c } = await f.request('/api/costumes', 'POST', { name: 'Pirata', size: 'M', quantity: 3 }, cookie);
+    const input = { costumeId: c.id, customerName: 'Ana', phone: '71999999999', pickupDate: '2090-01-01', dueDate: '2090-01-02', priceCents: 1000 };
+    const { data: a } = await f.request('/api/rentals', 'POST', input, cookie);
+    await f.request('/api/rentals', 'POST', { ...input, customerName: 'Bia' }, cookie);
+    const rows = (await f.request('/api/rentals', 'GET', undefined, cookie)).data;
+    assert.equal(rows.find(r => r.id === a.id).customerName, 'Ana');
+  } finally { await f.close(); f.db.close(); }
+});
+
+test('confirmações concorrentes compartilham um único envio', async () => {
+  let calls = 0, release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const f = await fixture({ whatsapp: { sendConfirmation: async () => { calls++; await gate; } } });
+  try {
+    const { cookie } = await f.request('/api/login', 'POST', { password: 'segredo-de-teste' });
+    const { data: c } = await f.request('/api/costumes', 'POST', { name: 'Fada', size: 'M', quantity: 1 }, cookie);
+    const { data: r } = await f.request('/api/rentals', 'POST', { costumeId: c.id, customerName: 'Ana', phone: '71999999999', pickupDate: '2090-01-01', dueDate: '2090-01-02', priceCents: 1000 }, cookie);
+    f.db.prepare('UPDATE rentals SET whatsapp_opt_in=1 WHERE id=?').run(r.id);
+    const requests = [f.request(`/api/rentals/${r.id}/notify`, 'POST', {}, cookie), f.request(`/api/rentals/${r.id}/notify`, 'POST', {}, cookie)];
+    await new Promise(resolve => setTimeout(resolve, 80));
+    release();
+    await Promise.all(requests);
+    assert.equal(calls, 1);
+  } finally { release(); await f.close(); f.db.close(); }
+});
+
+test('limite de login reserva tentativa antes de receber corpos concorrentes', async () => {
+  const { request: httpRequest } = await import('node:http');
+  const f = await fixture();
+  const pending = [];
+  try {
+    const port = f.server.address().port;
+    const payload = JSON.stringify({ username: 'admin', password: 'incorreta' });
+    for (let i = 0; i < 5; i++) {
+      const req = httpRequest({ host: '127.0.0.1', port, path: '/api/login', method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } });
+      const done = new Promise(resolve => { req.on('response', res => { res.resume(); res.on('end', () => resolve(res.statusCode)); }); req.on('error', () => resolve(0)); });
+      req.flushHeaders(); req.write(payload.slice(0, 1));
+      pending.push({ req, done });
+    }
+    // Fence: these connections already sent headers, but intentionally withhold their bodies.
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const sixth = await f.request('/api/login', 'POST', { password: 'incorreta' });
+    assert.equal(sixth.status, 429);
+    for (const { req } of pending) req.end(payload.slice(1));
+    assert.deepEqual(await Promise.all(pending.map(p => p.done)), [401,401,401,401,401]);
+  } finally { pending.forEach(p => p.req.destroy()); await f.close(); f.db.close(); }
 });

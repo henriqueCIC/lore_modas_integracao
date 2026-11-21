@@ -139,9 +139,9 @@ function parseCandidateJson(result) {
   throw Object.assign(new Error('Gemini não retornou dados legíveis'), { httpStatus: 502 });
 }
 
-export async function callGeminiJson({ apiKey, contents, schema, task = 'fantasia-mvp', fetchImpl = fetch, timeoutMs = 10_000 }) {
+export async function callGeminiJson({ apiKey, contents, schema, task = 'fantasia-mvp', fetchImpl = fetch, timeoutMs = 10_000, env = process.env, maxOutputTokens = 2048, onAttempt }) {
   if (!apiKey) throw Object.assign(new Error('Gemini não configurado'), { httpStatus: 503 });
-  const models = getGeminiModelCandidates();
+  const models = getGeminiModelCandidates(env);
   let lastStatus = 502;
   let lastDetail = '';
 
@@ -154,12 +154,14 @@ export async function callGeminiJson({ apiKey, contents, schema, task = 'fantasi
     for (let attempt = 0; attempt < maxAttempts + 1; attempt++) {
       const generationConfig = {
         temperature: 0,
-        maxOutputTokens: 2048,
+        maxOutputTokens,
         responseMimeType: 'application/json',
         ...(schema ? { responseSchema: schema } : {}),
         ...(useThinkingConfig ? { thinkingConfig: { thinkingLevel: 'minimal' } } : {}),
       };
       let response;
+      const started = Date.now();
+      const report = (status, usage) => onAttempt?.({ model, task, status, durationMs: Date.now() - started, apiKey, usage });
       try {
         response = await fetchImpl(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
           method: 'POST',
@@ -170,6 +172,7 @@ export async function callGeminiJson({ apiKey, contents, schema, task = 'fantasi
       } catch (error) {
         lastStatus = error?.name === 'TimeoutError' ? 'TIMEOUT' : 503;
         lastDetail = error?.message || 'Erro de rede';
+        report(String(lastStatus));
         if (i < models.length - 1) console.warn(`[gemini] modelo ${model} falhou (${lastStatus}), tentando próximo.`);
         break;
       }
@@ -177,7 +180,9 @@ export async function callGeminiJson({ apiKey, contents, schema, task = 'fantasi
       if (response.ok) {
         const result = await response.json();
         recordGeminiUsage(model, result.usageMetadata, task);
-        const parsed = parseCandidateJson(result);
+        let parsed;
+        try { parsed = parseCandidateJson(result); } catch (error) { report('invalid_response', result.usageMetadata); throw error; }
+        report('ok', result.usageMetadata);
         const meta = result.usageMetadata || {};
         const details = Array.isArray(meta.promptTokensDetails) ? meta.promptTokensDetails : [];
         const audioTokens = details.find(d => d?.modality === 'AUDIO')?.tokenCount || 0;
@@ -199,6 +204,7 @@ export async function callGeminiJson({ apiKey, contents, schema, task = 'fantasi
 
       const rawError = typeof response.text === 'function' ? await response.text().catch(() => '') : '';
       lastStatus = response.status;
+      report(String(response.status));
       lastDetail = rawError.slice(0, 240);
 
       if (response.status === 400 && useThinkingConfig && /thinking/i.test(rawError)) {
@@ -215,8 +221,11 @@ export async function callGeminiJson({ apiKey, contents, schema, task = 'fantasi
   throw makeGeminiError(lastStatus, lastDetail);
 }
 
-async function transcribeWithDedicatedModel({ mimeType, data, apiKey, fetchImpl = fetch, timeoutMs = 10_000 }) {
+async function transcribeWithDedicatedModel({ mimeType, data, apiKey, fetchImpl = fetch, timeoutMs = 10_000, onAttempt }) {
   const model = 'gemini-3.5-transcribe';
+  const started = Date.now();
+  let status = 'failed', usage;
+  try {
   const response = await fetchImpl(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
@@ -226,17 +235,20 @@ async function transcribeWithDedicatedModel({ mimeType, data, apiKey, fetchImpl 
     }),
     signal: AbortSignal.timeout(timeoutMs),
   });
-  if (!response.ok) throw makeGeminiError(response.status);
+  if (!response.ok) { status = String(response.status); throw makeGeminiError(response.status); }
   const result = await response.json();
   recordGeminiUsage(model, result.usageMetadata, 'audio-transcribe');
+  usage = result.usageMetadata;
   const parts = result?.candidates?.[0]?.content?.parts || [];
   const transcript = parts.find(p => typeof p?.audioTranscription?.text === 'string')?.audioTranscription?.text
     ?? parts.find(p => typeof p?.text === 'string' && !p.thought)?.text;
   if (typeof transcript !== 'string' || !transcript.trim()) throw Object.assign(new Error('Gemini não retornou transcrição legível'), { httpStatus: 502 });
+  status = 'ok';
   return transcript.trim();
+  } finally { onAttempt?.({ model, task: 'audio-transcribe', status, apiKey, usage, durationMs: Date.now() - started }); }
 }
 
-async function generateJson({ mimeType, fileName = '', data, apiKey, fetchImpl = fetch }, prompt, schema, task = 'fantasia-mvp') {
+async function generateJson({ mimeType, fileName = '', data, apiKey, fetchImpl = fetch, onAttempt, env }, prompt, schema, task = 'fantasia-mvp') {
   const cleanData = typeof data === 'string' ? data.replace(/\s+/g, '') : '';
   const resolvedMime = resolveMediaMime(mimeType, fileName, cleanData);
   const byteLength = cleanData && /^[A-Za-z0-9+/]+={0,2}$/.test(cleanData) ? Buffer.byteLength(cleanData, 'base64') : 0;
@@ -248,7 +260,7 @@ async function generateJson({ mimeType, fileName = '', data, apiKey, fetchImpl =
     contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType: resolvedMime, data: cleanData } }] }],
     schema,
     task,
-    fetchImpl,
+    fetchImpl, onAttempt, env,
   });
 }
 
@@ -271,8 +283,8 @@ export async function extractAudioBatch(options) {
   const resolvedMime = resolveMediaMime(options.mimeType, options.fileName, cleanData);
   if (!AUDIO_FORMATS.has(resolvedMime)) throw Object.assign(new Error('Formato inválido: envie um arquivo de áudio (OGG, Opus, MP3, M4A, MP4, WebM, WAV, AAC ou FLAC).'), { httpStatus: 422 });
 
-  const useCache = (!options.fetchImpl || options.fetchImpl === fetch) && cleanData.length > 32;
-  const cacheKey = useCache ? createHash('sha256').update(`${kind}:${cleanData}`).digest('hex') : '';
+  const useCache = options.cache !== false && (!options.fetchImpl || options.fetchImpl === fetch) && cleanData.length > 32;
+  const cacheKey = useCache ? createHash('sha256').update(`${kind}:${today()}:${options.apiKey}:${getGeminiModelCandidates(options.env).join(',')}:${cleanData}`).digest('hex') : '';
   if (cacheKey) {
     const cached = AUDIO_RESULT_CACHE.get(cacheKey);
     if (cached && Date.now() - cached.at < AUDIO_CACHE_TTL_MS) {
@@ -297,13 +309,13 @@ export async function extractAudioBatch(options) {
     if (error?.httpStatus !== 503) throw error;
     try {
       console.warn('[gemini] tentando fallback de transcrição em duas etapas com gemini-3.5-transcribe.');
-      const transcript = await transcribeWithDedicatedModel({ mimeType: resolvedMime, data: cleanData, apiKey: options.apiKey, fetchImpl: options.fetchImpl });
+      const transcript = await transcribeWithDedicatedModel({ mimeType: resolvedMime, data: cleanData, apiKey: options.apiKey, fetchImpl: options.fetchImpl, onAttempt: options.onAttempt });
       parsed = await callGeminiJson({
         apiKey: options.apiKey,
         contents: [{ parts: [{ text: `Extraia JSON {"transcript":string,"items":[${itemShape}]}. Não invente dados (null). Hoje: ${today()}. ${rules}\nTexto: ${transcript}` }] }],
         schema: null,
         task: `audio-batch-${kind}-struct`,
-        fetchImpl: options.fetchImpl,
+        fetchImpl: options.fetchImpl, onAttempt: options.onAttempt, env: options.env,
         timeoutMs: 8_000,
       });
       if (!parsed.transcript) parsed.transcript = transcript;
