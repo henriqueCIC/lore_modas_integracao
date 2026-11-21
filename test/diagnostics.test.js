@@ -77,3 +77,40 @@ test('credencial negada e timeout produzem erros sanitizados', async () => {
     } finally { db.close(); }
   }
 });
+
+test('código de diagnóstico expirado ou removido nunca vira pedido operacional', async () => {
+  const db = createDatabase(':memory:');
+  try {
+    const d = createDiagnostics({ db, env: { WHATSAPP_APP_SECRET:'secret',WHATSAPP_VERIFY_TOKEN:'verify',WHATSAPP_TOKEN:'token',WHATSAPP_PHONE_ID:'phone' } });
+    const challenge = await d.run('webhook', 'connection', 1);
+    db.prepare('UPDATE diagnostic_challenges SET expires_at=?').run(Date.now()-1);
+    assert.equal(d.consumeChallenge({ text: { body: challenge.code } }), true);
+    assert.equal(db.prepare('SELECT received_at FROM diagnostic_challenges').get().received_at, null);
+    db.exec('DELETE FROM diagnostic_challenges');
+    assert.equal(d.consumeChallenge({ text: { body: challenge.code } }), true);
+    assert.equal(d.consumeChallenge({ text: { body: 'Quero uma fantasia' } }), false);
+  } finally { db.close(); }
+});
+
+test('teste local de webhook não comprova callback e consumo ausente permanece desconhecido', async () => {
+  const db = createDatabase(':memory:');
+  try {
+    const env = { WHATSAPP_APP_SECRET:'secret',WHATSAPP_VERIFY_TOKEN:'verify',WHATSAPP_TOKEN:'token',WHATSAPP_PHONE_ID:'phone', GEMINI_API_KEY:'key',GEMINI_MODEL:'test',GEMINI_FALLBACK_MODELS:'test' };
+    const d = createDiagnostics({ db, env, fetchImpl: async () => ({ ok:true,json:async()=>({candidates:[{content:{parts:[{text:'{"ok":true}'}]}}]}) }) });
+    await d.run('webhook', 'connection', 1);
+    assert.equal(d.summary().find(i=>i.id==='webhook').lastEvent,null);
+    d.webhook({statuses:[]});
+    assert.ok(d.summary().find(i=>i.id==='webhook').lastEvent);
+    const result = await d.run('gemini','response',1);
+    assert.equal(result.usage.totalTokens,null);
+    assert.equal(db.prepare("SELECT tokens FROM integration_events WHERE kind='test:response'").get().tokens,null);
+  } finally { db.close(); }
+});
+
+test('resposta sem usageMetadata não afirma custo zero', async () => {
+  const db=createDatabase(':memory:');
+  try {
+    const d=createDiagnostics({db,env:{GEMINI_API_KEY:'key',GEMINI_MODEL:'test',GEMINI_FALLBACK_MODELS:'test'},fetchImpl:async()=>({ok:true,json:async()=>({candidates:[{content:{parts:[{text:'{"ok":true}'}]}}]})})});
+    assert.equal((await d.run('gemini','response',1)).usage.totalTokens,null);
+  } finally { db.close(); }
+});

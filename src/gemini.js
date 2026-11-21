@@ -195,7 +195,7 @@ export async function callGeminiJson({ apiKey, contents, schema, task = 'fantasi
             textTokens,
             outputTokens: meta.candidatesTokenCount || 0,
             reasoningTokens: meta.thoughtsTokenCount || 0,
-            totalTokens: meta.totalTokenCount || ((meta.promptTokenCount || 0) + (meta.candidatesTokenCount || 0) + (meta.thoughtsTokenCount || 0)),
+            totalTokens: meta.totalTokenCount ?? (Number.isFinite(meta.promptTokenCount) && Number.isFinite(meta.candidatesTokenCount) ? meta.promptTokenCount + meta.candidatesTokenCount + (meta.thoughtsTokenCount || 0) : null),
           },
           enumerable: false,
         });

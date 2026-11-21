@@ -38,3 +38,27 @@ test('provisionamento e recuperação preservam base anterior e fazem backup ant
     db = createDatabase(path); assert.equal(createAuth(db).login('lore', 'temporaria-lore-123').user.mustChange, true); db.close();
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test('migração de aluguel legado mantém IDs, valor, cliente e snapshot do nome', async () => {
+  const { openDatabase } = await import('../src/open-database.js');
+  const dir = await mkdtemp(join(tmpdir(), 'lore-legacy-'));
+  const path = join(dir, 'legacy.sqlite');
+  const legacy = new DatabaseSync(path);
+  legacy.exec(`
+    CREATE TABLE costumes(id INTEGER PRIMARY KEY,name TEXT NOT NULL,size TEXT NOT NULL,quantity INTEGER NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE customers(id INTEGER PRIMARY KEY,name TEXT NOT NULL,phone TEXT NOT NULL UNIQUE,whatsapp_opt_in INTEGER DEFAULT 0);
+    CREATE TABLE rentals(id INTEGER PRIMARY KEY,costume_id INTEGER NOT NULL REFERENCES costumes(id),customer_id INTEGER NOT NULL REFERENCES customers(id),pickup_date TEXT NOT NULL,due_date TEXT NOT NULL,returned_date TEXT,price_cents INTEGER NOT NULL,late_fee_cents INTEGER DEFAULT 0,reminded_at TEXT,status TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+    INSERT INTO costumes(id,name,size,quantity) VALUES (7,'Pirata','M',2);
+    INSERT INTO customers(id,name,phone) VALUES (9,'Ana','5571999999999');
+    INSERT INTO rentals(id,costume_id,customer_id,pickup_date,due_date,price_cents,status) VALUES (11,7,9,'2090-01-01','2090-01-02',15000,'confirmed');
+  `);
+  legacy.close();
+  try {
+    const db = await openDatabase({ DB_PATH: path });
+    try {
+      assert.deepEqual({ ...db.prepare('SELECT id,customer_id,costume_id,price_cents,customer_name FROM rentals').get() }, { id:11,customer_id:9,costume_id:7,price_cents:15000,customer_name:'Ana' });
+      assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+      assert.equal(db.prepare('SELECT COUNT(*) n FROM users').get().n, 0);
+    } finally { db.close(); }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

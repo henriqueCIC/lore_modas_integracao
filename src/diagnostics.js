@@ -31,7 +31,7 @@ export function createDiagnostics({ db, env = process.env, fetchImpl = fetch }) 
     return [
       { id: 'gemini', name: 'Gemini', ...credential(env.GEMINI_API_KEY), source: 'Ambiente do servidor', models: getGeminiModelCandidates(env), tests: ['connection', 'response', 'audio'] },
       { id: 'whatsapp', name: 'WhatsApp / Meta', ...credential(env.WHATSAPP_TOKEN), configured: Boolean(env.WHATSAPP_TOKEN && env.WHATSAPP_PHONE_ID), phoneId: env.WHATSAPP_PHONE_ID || '', wabaId: env.WHATSAPP_WABA_ID || '', apiVersion: env.WHATSAPP_API_VERSION || 'v23.0', templates: [env.WHATSAPP_CONFIRMATION_TEMPLATE, env.WHATSAPP_REMINDER_TEMPLATE].filter(Boolean), testRecipient: env.WHATSAPP_TEST_PHONE || '', tests: ['connection', 'templates', 'send'] },
-      { id: 'webhook', name: 'Recebimento WhatsApp', configured: Boolean(env.WHATSAPP_APP_SECRET && env.WHATSAPP_VERIFY_TOKEN && env.WHATSAPP_TOKEN && env.WHATSAPP_PHONE_ID), lastEvent: db.prepare("SELECT created_at FROM integration_events WHERE provider='webhook' ORDER BY id DESC LIMIT 1").get()?.created_at || null, challenge: db.prepare('SELECT code, received_at AS receivedAt, expires_at AS expiresAt FROM diagnostic_challenges ORDER BY expires_at DESC LIMIT 1').get() || null, deliveries: db.prepare('SELECT * FROM diagnostic_messages ORDER BY updated_at DESC LIMIT 10').all(), tests: ['connection'] },
+      { id: 'webhook', name: 'Recebimento WhatsApp', configured: Boolean(env.WHATSAPP_APP_SECRET && env.WHATSAPP_VERIFY_TOKEN && env.WHATSAPP_TOKEN && env.WHATSAPP_PHONE_ID), lastEvent: db.prepare("SELECT created_at FROM integration_events WHERE provider='webhook' AND kind='received' ORDER BY id DESC LIMIT 1").get()?.created_at || null, challenge: db.prepare('SELECT code, received_at AS receivedAt, expires_at AS expiresAt FROM diagnostic_challenges ORDER BY expires_at DESC LIMIT 1').get() || null, deliveries: db.prepare('SELECT * FROM diagnostic_messages ORDER BY updated_at DESC LIMIT 10').all(), tests: ['connection'] },
       { id: 'sqlite', name: 'Banco de dados', configured: true, tests: ['connection'] },
       { id: 'hermes', name: 'Monitoramento de consumo', configured: Boolean(resolveHermesUsageDbPath(env)), tests: ['connection'] },
       { id: 'backup', name: 'Backup', configured: Boolean(env.BACKUP_DIR), lastBackup: db.prepare('SELECT * FROM backup_runs ORDER BY id DESC LIMIT 1').get() || null, tests: ['connection'] },
@@ -128,9 +128,9 @@ export function createDiagnostics({ db, env = process.env, fetchImpl = fetch }) 
   }
   function consumeChallenge(message) {
     const text = message.text?.body?.trim();
-    if (!text?.startsWith('LORE-TESTE-')) return false;
+    if (typeof text !== 'string' || !/^LORE-TESTE-[a-f0-9]{12}$/.test(text)) return false;
     const challenge = db.prepare('SELECT * FROM diagnostic_challenges WHERE code=? AND expires_at>?').get(text, Date.now());
-    if (!challenge) return false;
+    if (!challenge) return true;
     db.prepare('UPDATE diagnostic_challenges SET received_at=CURRENT_TIMESTAMP WHERE code=?').run(text);
     return true;
   }

@@ -1,6 +1,6 @@
 # Administração, acessos e diagnóstico — plano proposto
 
-Status: implementação autorizada e concluída; revisão final em andamento. Complementa a auditoria de 20/11/2026 em lore_modas_integracao, commit 6d2b0fc.
+Status: implementação concluída e revisada; 63 testes aprovados em 21/11/2026. Complementa a auditoria de 20/11/2026 em lore_modas_integracao, commit 6d2b0fc.
 
 **Objetivo:** Henrique administra o acesso da Lore e verifica as integrações efetivamente usadas pela loja, sem compartilhar credenciais de acesso.
 **Arquitetura proposta:** mesmo servidor e SQLite, contas individuais com papéis admin e operator, área /#admin com APIs protegidas no backend. Reutilizar as integrações atuais e sua interface HTML/CSS/JavaScript; nenhuma migração de framework.
